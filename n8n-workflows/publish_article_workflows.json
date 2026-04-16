@@ -1,0 +1,313 @@
+[
+  {
+    "name": "Generate and Stage Article",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "cronExpression": "0 7 * * *",
+          "options": {}
+        },
+        "name": "Cron",
+        "type": "n8n-nodes-base.cron",
+        "typeVersion": 1,
+        "position": [200, 200]
+      },
+      {
+        "parameters": {
+          "path": "generate-article",
+          "httpMethod": "POST",
+          "responseMode": "onReceived",
+          "responseData": "default"
+        },
+        "name": "Webhook Trigger",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [200, 400]
+      },
+      {
+        "parameters": {
+          "url": "=https://news.google.com/rss/search?q=AI+OR+Nvidia+OR+GPU+OR+Google+OR+Microsoft+OR+cybersecurity&hl=en-US&gl=US&ceid=US:en",
+          "responseFormat": "string",
+          "options": {}
+        },
+        "name": "Fetch News (RSS)",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 1,
+        "position": [450, 180]
+      },
+      {
+        "parameters": {
+          "url": "=https://cve.circl.lu/api/search/keyword/AI",
+          "responseFormat": "json",
+          "options": {}
+        },
+        "name": "Fetch CVEs (placeholder)",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 1,
+        "position": [450, 320]
+      },
+      {
+        "parameters": {
+          "functionCode": "// Combine sources into a prompt for the AI\nconst newsXml = items[0].json.body || items[0].json;\nconst cves = items[1].json || {};\nconst topNews = typeof newsXml === 'string' ? newsXml.slice(0, 3000) : JSON.stringify(newsXml).slice(0,3000);\nconst topCves = JSON.stringify(cves).slice(0,3000);\nconst prompt = `You are a concise technical writer. Using the following sources, write a 700-1100 word article aimed at a technical audience about recent developments in AI, GPU hardware (NVIDIA), Google, Microsoft, and cybersecurity threats. Include short summaries of the most relevant CVEs and explain the impact and mitigation advice.\n\nSources (summarized):\n${topNews}\n\nCVEs:\n${topCves}\n\nFormatting: produce Markdown suitable for the existing site. Use a clear H1 title, H2 sections, bullet lists for CVEs, and a short 2-sentence summary at the top. Use neutral tone.\n\nReturn only the article markdown in the response.\n` ;\nreturn [{ json: { articlePrompt: prompt } }];"
+        },
+        "name": "Compile Prompt",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [700, 250]
+      },
+      {
+        "parameters": {
+          "requestMethod": "POST",
+          "url": "={{$env.COPILOT_SHIM_URL || 'http://localhost:4142'}}/v1/chat/completions",
+          "jsonParameters": true,
+          "options": {},
+          "bodyParametersJson": "={\n  \"model\": \"gpt-5-mini\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are a concise technical writer that outputs ready-to-publish Markdown articles.\" },\n    { \"role\": \"user\", \"content\": {{$json[\"articlePrompt\"]}} }\n  ],\n  \"max_tokens\": 2000\n}"
+        },
+        "name": "Generate Article (AI)",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 1,
+        "position": [980, 250]
+      },
+      {
+        "parameters": {
+          "functionCode": "// Build filename and staging path\nconst title = new Date().toISOString().slice(0,10) + '-ai-roundup.md';\nconst content = $json[\"choices\"] && $json[\"choices\"][0] && $json[\"choices\"][0].message && $json[\"choices\"][0].message.content ? $json[\"choices\"][0].message.content : ( $json[\"text\"] || JSON.stringify($json).slice(0,2000) );\nreturn [{ json: { filename: title, content } }];"
+        },
+        "name": "Prepare Article",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [1220, 250]
+      },
+      {
+        "parameters": {
+          "operation": "upload",
+          "remotePath": "={{$json[\"filename\"]}}",
+          "binaryData": false,
+          "fileContent": "={{$json[\"content\"]}}",
+          "options": {}
+        },
+        "name": "Upload to Staging (SFTP)",
+        "type": "n8n-nodes-base.sftp",
+        "typeVersion": 1,
+        "position": [1450, 250],
+        "credentials": {
+          "sftp": {
+            "id": "=parseInt($env.SFTP_CRED_ID || '0')",
+            "name": "SSH Server (placeholder)"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "fromEmail": "={{$env.NOTIFY_FROM || 'noreply@example.com'}}",
+          "toEmail": "={{$env.NOTIFY_EMAIL || 'you@example.com'}}",
+          "subject": "New article drafted for review: {{$json[\"filename\"]}}",
+          "text": "A new article has been drafted and staged at {{ $env.STAGING_PATH || '/tmp' }}/{{$json[\"filename\"]}}\n\nApprove: {{$env.N8N_BASE_URL || 'https://your-n8n.example.com'}}/webhook/publish-approval?action=approve&file={{$json[\"filename\"]}}\nRedo: {{$env.N8N_BASE_URL || 'https://your-n8n.example.com'}}/webhook/publish-approval?action=redo&file={{$json[\"filename\"]}}\nReject: {{$env.N8N_BASE_URL || 'https://your-n8n.example.com'}}/webhook/publish-approval?action=reject&file={{$json[\"filename\"]}}",
+          "html": ""
+        },
+        "name": "Notify for Review (Email)",
+        "type": "n8n-nodes-base.emailSend",
+        "typeVersion": 1,
+        "position": [1700, 250],
+        "credentials": {
+          "smtp": {
+            "id": "=parseInt($env.SMTP_CRED_ID || '0')",
+            "name": "SMTP Placeholder"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Cron": {
+        "main": [
+          [
+            {
+              "node": "Fetch News (RSS)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Webhook Trigger": {
+        "main": [
+          [
+            {
+              "node": "Fetch News (RSS)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch News (RSS)": {
+        "main": [
+          [
+            {
+              "node": "Fetch CVEs (placeholder)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch CVEs (placeholder)": {
+        "main": [
+          [
+            {
+              "node": "Compile Prompt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Compile Prompt": {
+        "main": [
+          [
+            {
+              "node": "Generate Article (AI)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Article (AI)": {
+        "main": [
+          [
+            {
+              "node": "Prepare Article",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Article": {
+        "main": [
+          [
+            {
+              "node": "Upload to Staging (SFTP)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Upload to Staging (SFTP)": {
+        "main": [
+          [
+            {
+              "node": "Notify for Review (Email)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {},
+    "id": "generate-and-stage-article"
+  },
+  {
+    "name": "Publish Approval Handler",
+    "active": false,
+    "nodes": [
+      {
+        "parameters": {
+          "path": "publish-approval",
+          "httpMethod": "GET",
+          "responseMode": "onReceived",
+          "responseData": "default"
+        },
+        "name": "Approval Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 1,
+        "position": [300, 300]
+      },
+      {
+        "parameters": {
+          "functionCode": "// Read query params and branch\nconst qs = $json[\"query\"] || {};\nconst action = qs.action || qs.action || (qs.__query && qs.__query.action) || null;\nconst file = qs.file || (qs.__query && qs.__query.file) || null;\nreturn [{ json: { action, file } }];"
+        },
+        "name": "Parse Request",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [560, 300]
+      },
+      {
+        "parameters": {
+          "operation": "exec",
+          "command": "=if ($json['action'] === 'approve') { return `mv ${$env.STAGING_PATH || '/tmp'}/` + $json['file'] + ' ' + ($env.SITE_CONTENT_PATH || '/var/www/pit-site/content/') + ' && cd ' + ($env.SITE_ROOT || '/var/www/pit-site') + ' && npm run build && rsync -a --delete ./dist/ ' + ($env.PUBLISH_PATH || '/var/www/pushit-new/'); } else if ($json['action'] === 'redo') { return `curl -s -X POST {{$env.N8N_BASE_URL || 'https://your-n8n.example.com'}}/webhook/generate-article`; } else { return `rm -f ${$env.STAGING_PATH || '/tmp'}/${$json['file']}`; }",
+          "options": {}
+        },
+        "name": "Execute Publish/Redo/Reject (SSH)",
+        "type": "n8n-nodes-base.ssh",
+        "typeVersion": 1,
+        "position": [880, 300],
+        "credentials": {
+          "sshPassword": {
+            "id": "=parseInt($env.SSH_CRED_ID || '0')",
+            "name": "SSH Server (placeholder)"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "fromEmail": "={{$env.NOTIFY_FROM || 'noreply@example.com'}}",
+          "toEmail": "={{$env.NOTIFY_EMAIL || 'you@example.com'}}",
+          "subject": "Article action executed: {{$json[\"action\"]}}",
+          "text": "Action {{$json[\"action\"]}} executed for file {{$json[\"file\"]}}",
+          "html": ""
+        },
+        "name": "Notify Result (Email)",
+        "type": "n8n-nodes-base.emailSend",
+        "typeVersion": 1,
+        "position": [1160, 300],
+        "credentials": {
+          "smtp": {
+            "id": "=parseInt($env.SMTP_CRED_ID || '0')",
+            "name": "SMTP Placeholder"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Approval Webhook": {
+        "main": [
+          [
+            {
+              "node": "Parse Request",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Request": {
+        "main": [
+          [
+            {
+              "node": "Execute Publish/Redo/Reject (SSH)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Execute Publish/Redo/Reject (SSH)": {
+        "main": [
+          [
+            {
+              "node": "Notify Result (Email)",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {},
+    "id": "publish-approval-handler"
+  }
+]
