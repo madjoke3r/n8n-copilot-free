@@ -223,16 +223,18 @@ ok ".env written to ${ENV_FILE}"
 # ── patch compose for SSL if certs provided ───────────────────────────────────
 if [[ -n "${N8N_SSL_CERT}" && -n "${N8N_SSL_KEY}" ]]; then
   CERT_DIR="$(dirname "${N8N_SSL_CERT}")"
+  CERT_BASENAME="$(basename "${N8N_SSL_CERT}")"
+  KEY_BASENAME="$(basename "${N8N_SSL_KEY}")"
   info "Patching docker-compose.yml for SSL (cert dir: ${CERT_DIR})"
-  python3 - "$COMPOSE_FILE" "$CERT_DIR" <<'PYEOF'
+  python3 - "$COMPOSE_FILE" "$CERT_DIR" "$CERT_BASENAME" "$KEY_BASENAME" <<'PYEOF'
 import sys
-compose_file, cert_dir = sys.argv[1], sys.argv[2]
+compose_file, cert_dir, cert_base, key_base = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(compose_file, 'r') as f:
     c = f.read()
 if 'N8N_SSL_CERT' not in c:
     c = c.replace(
         '      N8N_PUSH_BACKEND: websocket',
-        '      N8N_PUSH_BACKEND: websocket\n      N8N_SSL_CERT: ${N8N_SSL_CERT}\n      N8N_SSL_KEY: ${N8N_SSL_KEY}'
+        '      N8N_PUSH_BACKEND: websocket\n      N8N_SSL_CERT: /certs/' + cert_base + '\n      N8N_SSL_KEY: /certs/' + key_base
     )
 if 'certs:ro' not in c:
     c = c.replace(
