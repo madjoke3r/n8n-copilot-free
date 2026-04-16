@@ -67,6 +67,9 @@ N8N_PROTOCOL="${N8N_PROTOCOL:-http}"
 N8N_EDITOR_BASE_URL="${N8N_EDITOR_BASE_URL:-http://localhost:${N8N_PORT}}"
 WEBHOOK_URL="${WEBHOOK_URL:-http://localhost:${N8N_PORT}/webhook}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Change@Me123}"
+N8N_SSL_CERT="${N8N_SSL_CERT:-}"
+N8N_SSL_KEY="${N8N_SSL_KEY:-}"
+N8N_SECURE_COOKIE="${N8N_SECURE_COOKIE:-false}"
 
 info "Desired ports → n8n:${N8N_PORT}  copilot-api:${COPILOT_API_PORT}  shim:${COPILOT_SHIM_PORT}"
 
@@ -195,9 +198,43 @@ WEBHOOK_URL=${WEBHOOK_URL}
 N8N_ENCRYPTION_KEY=${CFG_ENCRYPTION_KEY}
 JWT_SECRET=${CFG_JWT_SECRET}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
+N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
 EOF
 
+# Write SSL vars only if provided
+if [[ -n "${N8N_SSL_CERT}" && -n "${N8N_SSL_KEY}" ]]; then
+  echo "N8N_SSL_CERT=${N8N_SSL_CERT}" >> "$ENV_FILE"
+  echo "N8N_SSL_KEY=${N8N_SSL_KEY}" >> "$ENV_FILE"
+  info "SSL cert paths written to .env"
+fi
+
 ok ".env written to ${ENV_FILE}"
+
+# ── patch compose for SSL if certs provided ───────────────────────────────────
+if [[ -n "${N8N_SSL_CERT}" && -n "${N8N_SSL_KEY}" ]]; then
+  CERT_DIR="$(dirname "${N8N_SSL_CERT}")"
+  info "Patching docker-compose.yml for SSL (cert dir: ${CERT_DIR})"
+  python3 - "$COMPOSE_FILE" "$CERT_DIR" <<'PYEOF'
+import sys
+compose_file, cert_dir = sys.argv[1], sys.argv[2]
+with open(compose_file, 'r') as f:
+    c = f.read()
+if 'N8N_SSL_CERT' not in c:
+    c = c.replace(
+        '      N8N_PUSH_BACKEND: websocket',
+        '      N8N_PUSH_BACKEND: websocket\n      N8N_SSL_CERT: ${N8N_SSL_CERT}\n      N8N_SSL_KEY: ${N8N_SSL_KEY}'
+    )
+if 'certs:ro' not in c:
+    c = c.replace(
+        '      - n8n_data:/home/node/.n8n',
+        '      - n8n_data:/home/node/.n8n\n      - ' + cert_dir + ':/certs:ro'
+    )
+with open(compose_file, 'w') as f:
+    f.write(c)
+print('compose patched for SSL')
+PYEOF
+  ok "docker-compose.yml patched for SSL"
+fi
 
 # ── pull images ───────────────────────────────────────────────────────────────
 header "Pulling Docker images"
