@@ -2,6 +2,7 @@
  * responses-shim.js
  * Translates OpenAI Responses API (/v1/responses) to Chat Completions API (/v1/chat/completions)
  * and passes all other requests through to copilot-api.
+ * Handles tool calls (function calling) in both directions.
  * Listens on :4142, upstream is copilot-api:4141.
  * Zero npm dependencies — pure Node.js built-ins only.
  */
@@ -46,49 +47,166 @@ function flattenContent(content) {
   return String(content);
 }
 
-// ── /v1/responses handler ─────────────────────────────────────────────────────
+// Convert Responses API tools → Chat Completions tools format
+// Responses: { type:'function', name, description, parameters }
+// Chat:      { type:'function', function: { name, description, parameters } }
+function convertToolsToChat(tools) {
+  if (!tools || !Array.isArray(tools)) return undefined;
+  return tools.map(t => {
+    if (t.type === 'function') {
+      return {
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description || '',
+          parameters: t.parameters || t.input_schema || { type: 'object', properties: {} },
+        },
+      };
+    }
+    return t;
+  });
+}
 
-function handleResponsesRequest(reqBody, authHeader, callback) {
-  let parsed;
-  try { parsed = JSON.parse(reqBody); }
-  catch (e) {
-    console.error('[shim] JSON parse error. Raw body (hex):', Buffer.from(reqBody).toString('hex').slice(0, 80));
-    return callback({ status: 400, message: 'Invalid JSON in request body' });
+// Convert Responses API tool_choice → Chat Completions tool_choice
+function convertToolChoice(tc) {
+  if (!tc || typeof tc === 'string') return tc;
+  // { type:'function', name:'foo' } → { type:'function', function:{ name:'foo' } }
+  if (tc.type === 'function' && tc.name) {
+    return { type: 'function', function: { name: tc.name } };
   }
-  console.log('[shim] Request model:', parsed.model, '| stream:', parsed.stream,
-    '| input type:', typeof parsed.input,
-    '| input preview:', JSON.stringify(parsed.input).slice(0, 120));
+  return tc;
+}
 
-  const wantsStream = !!parsed.stream;
-
-  // Build messages array
+// Build Chat Completions messages array from Responses API input
+function buildMessages(parsed) {
   const messages = [];
 
   if (parsed.instructions) {
     messages.push({ role: 'system', content: parsed.instructions });
   }
 
-  // `input` can be a string, an array of message objects, or an array of content parts
   if (typeof parsed.input === 'string') {
     messages.push({ role: 'user', content: parsed.input });
-  } else if (Array.isArray(parsed.input)) {
-    for (const item of parsed.input) {
-      if (!item) continue;
-      // Responses API message object: { type:'message', role, content }
-      if (item.type === 'message' || item.role) {
-        messages.push({ role: item.role || 'user', content: flattenContent(item.content) });
+    return messages;
+  }
+
+  if (!Array.isArray(parsed.input)) return messages;
+
+  // Track consecutive function_call items to group as one assistant message
+  let pendingToolCalls = null;
+
+  const flushToolCalls = () => {
+    if (pendingToolCalls) {
+      messages.push({ role: 'assistant', content: null, tool_calls: pendingToolCalls });
+      pendingToolCalls = null;
+    }
+  };
+
+  for (const item of parsed.input) {
+    if (!item) continue;
+
+    if (item.type === 'function_call') {
+      // AI's tool call — accumulate until flushed
+      if (!pendingToolCalls) pendingToolCalls = [];
+      pendingToolCalls.push({
+        id: item.call_id || item.id || ('call_' + Date.now()),
+        type: 'function',
+        function: { name: item.name, arguments: item.arguments || '{}' },
+      });
+
+    } else if (item.type === 'function_call_output') {
+      // Tool result — flush pending tool calls first, then add tool message
+      flushToolCalls();
+      messages.push({
+        role: 'tool',
+        tool_call_id: item.call_id || item.id,
+        content: typeof item.output === 'string' ? item.output : JSON.stringify(item.output),
+      });
+
+    } else if (item.type === 'message' || item.role) {
+      flushToolCalls();
+      const role = item.role || 'user';
+      if (Array.isArray(item.content)) {
+        // Some n8n versions embed tool_result blocks inside a user message content array
+        const toolResults = item.content.filter(c => c.type === 'tool_result');
+        const textParts  = item.content.filter(c => c.type !== 'tool_result');
+        for (const tr of toolResults) {
+          messages.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: flattenContent(tr.content) });
+        }
+        if (textParts.length > 0) {
+          messages.push({ role, content: flattenContent(textParts) });
+        }
+      } else {
+        messages.push({ role, content: flattenContent(item.content) });
       }
     }
   }
 
-  const chatBody = {
-    model: parsed.model,
-    messages,
-    stream: false,
-  };
+  flushToolCalls();
+  return messages;
+}
+
+// Translate Chat Completions response → Responses API response object
+function buildResponseObject(data, parsedModel) {
+  const choice = (data.choices || [])[0] || {};
+  const message = choice.message || {};
+  const output = [];
+  const now = data.created || Math.floor(Date.now() / 1000);
+  const id = data.id || ('resp_' + Date.now());
+
+  if (message.tool_calls && message.tool_calls.length > 0) {
+    for (const tc of message.tool_calls) {
+      const callId = tc.id || ('call_' + Date.now());
+      output.push({
+        type: 'function_call',
+        id: callId,
+        call_id: callId,
+        name: tc.function?.name || '',
+        arguments: tc.function?.arguments || '{}',
+        status: 'completed',
+      });
+    }
+  } else {
+    output.push({
+      type: 'message',
+      id: 'msg_' + Date.now(),
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text: message.content || '' }],
+    });
+  }
+
+  return { id, object: 'response', created_at: now, model: data.model || parsedModel, status: 'completed', error: null, output, usage: data.usage || {} };
+}
+
+// ── /v1/responses handler ─────────────────────────────────────────────────────
+
+function handleResponsesRequest(reqBody, authHeader, callback) {
+  let parsed;
+  try { parsed = JSON.parse(reqBody); }
+  catch (e) {
+    return callback({ status: 400, message: 'Invalid JSON in request body' });
+  }
+
+  const hasTools = parsed.tools && parsed.tools.length > 0;
+  console.log('[shim] Request model:', parsed.model,
+    '| stream:', parsed.stream,
+    '| tools:', hasTools ? parsed.tools.length : 0,
+    '| input preview:', JSON.stringify(parsed.input).slice(0, 120));
+
+  const wantsStream = !!parsed.stream;
+  const messages = buildMessages(parsed);
+
+  const chatBody = { model: parsed.model, messages, stream: false };
   if (parsed.max_output_tokens != null) chatBody.max_tokens = parsed.max_output_tokens;
   if (parsed.temperature != null) chatBody.temperature = parsed.temperature;
   if (parsed.top_p != null) chatBody.top_p = parsed.top_p;
+
+  // Pass tools to upstream so model can return tool_calls
+  if (hasTools) {
+    chatBody.tools = convertToolsToChat(parsed.tools);
+    if (parsed.tool_choice != null) chatBody.tool_choice = convertToolChoice(parsed.tool_choice);
+  }
 
   const bodyBuf = Buffer.from(JSON.stringify(chatBody));
   const headers = {
@@ -108,116 +226,103 @@ function handleResponsesRequest(reqBody, authHeader, callback) {
       return callback({ status, message: data.error?.message || respBuf.toString() });
     }
 
-    const choice = (data.choices || [])[0] || {};
-    const content = choice.message?.content || '';
-
-    const response = {
-      id: data.id || ('resp_' + Date.now()),
-      object: 'response',
-      created_at: data.created || Math.floor(Date.now() / 1000),
-      model: data.model || parsed.model,
-      status: 'completed',
-      error: null,
-      output: [
-        {
-          type: 'message',
-          id: 'msg_' + Date.now(),
-          role: 'assistant',
-          status: 'completed',
-          content: [{ type: 'output_text', text: content }],
-        },
-      ],
-      usage: data.usage || {},
-    };
-
+    const response = buildResponseObject(data, parsed.model);
+    const hasToolCalls = response.output.some(o => o.type === 'function_call');
+    console.log('[shim] Response:', hasToolCalls ? `tool_calls(${response.output.length})` : 'text',
+      '| model:', response.model);
     callback(null, response, wantsStream);
-    console.log('[shim] Response sent:', JSON.stringify(response).slice(0, 300));
   });
 }
 
-// ── HTTP server ───────────────────────────────────────────────────────────────
+// ── SSE streaming response ─────────────────────────────────────────────────────
 
 function sendStreamingResponse(res, data) {
-  // Emit the OpenAI Responses API SSE event sequence n8n expects.
   const respId = data.id;
   const model = data.model;
-  const text = ((data.output[0] || {}).content || [{}])[0].text || '';
   const now = data.created_at || Math.floor(Date.now() / 1000);
-
   const send = (evt, obj) => res.write(`event: ${evt}\ndata: ${JSON.stringify(obj)}\n\n`);
 
-  // 1 – response.created
   send('response.created', {
     type: 'response.created',
     response: { id: respId, object: 'response', created_at: now, model, status: 'in_progress', output: [], usage: null },
   });
-
-  // 2 – response.in_progress
   send('response.in_progress', {
     type: 'response.in_progress',
     response: { id: respId, object: 'response', created_at: now, model, status: 'in_progress', output: [], usage: null },
   });
 
-  // 3 – output item added
-  send('response.output_item.added', {
-    type: 'response.output_item.added',
-    output_index: 0,
-    item: { type: 'message', id: data.output[0].id, role: 'assistant', status: 'in_progress', content: [] },
-  });
+  for (let i = 0; i < data.output.length; i++) {
+    const item = data.output[i];
 
-  // 4 – content part added
-  send('response.content_part.added', {
-    type: 'response.content_part.added',
-    item_id: data.output[0].id,
-    output_index: 0,
-    content_index: 0,
-    part: { type: 'output_text', text: '' },
-  });
+    if (item.type === 'function_call') {
+      // ── tool call streaming ──
+      send('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: i,
+        item: { type: 'function_call', id: item.id, call_id: item.call_id, name: item.name, arguments: '', status: 'in_progress' },
+      });
 
-  // 5 – stream the text as delta chunks (split into ~20-char pieces so n8n sees deltas)
-  const chunkSize = 20;
-  for (let i = 0; i < text.length; i += chunkSize) {
-    send('response.output_text.delta', {
-      type: 'response.output_text.delta',
-      item_id: data.output[0].id,
-      output_index: 0,
-      content_index: 0,
-      delta: text.slice(i, i + chunkSize),
-    });
+      const args = item.arguments || '{}';
+      const chunkSize = 20;
+      for (let j = 0; j < args.length; j += chunkSize) {
+        send('response.function_call_arguments.delta', {
+          type: 'response.function_call_arguments.delta',
+          item_id: item.id, output_index: i,
+          delta: args.slice(j, j + chunkSize),
+        });
+      }
+      send('response.function_call_arguments.done', {
+        type: 'response.function_call_arguments.done',
+        item_id: item.id, output_index: i, arguments: args,
+      });
+      send('response.output_item.done', {
+        type: 'response.output_item.done',
+        output_index: i,
+        item: { type: 'function_call', id: item.id, call_id: item.call_id, name: item.name, arguments: args, status: 'completed' },
+      });
+
+    } else if (item.type === 'message') {
+      // ── text message streaming ──
+      const text  = ((item.content || [{}])[0] || {}).text || '';
+      const msgId = item.id;
+
+      send('response.output_item.added', {
+        type: 'response.output_item.added', output_index: i,
+        item: { type: 'message', id: msgId, role: 'assistant', status: 'in_progress', content: [] },
+      });
+      send('response.content_part.added', {
+        type: 'response.content_part.added',
+        item_id: msgId, output_index: i, content_index: 0,
+        part: { type: 'output_text', text: '' },
+      });
+
+      const chunkSize = 20;
+      for (let j = 0; j < text.length; j += chunkSize) {
+        send('response.output_text.delta', {
+          type: 'response.output_text.delta',
+          item_id: msgId, output_index: i, content_index: 0,
+          delta: text.slice(j, j + chunkSize),
+        });
+      }
+      send('response.output_text.done', {
+        type: 'response.output_text.done',
+        item_id: msgId, output_index: i, content_index: 0, text,
+      });
+      send('response.content_part.done', {
+        type: 'response.content_part.done',
+        item_id: msgId, output_index: i, content_index: 0,
+        part: { type: 'output_text', text },
+      });
+      send('response.output_item.done', {
+        type: 'response.output_item.done', output_index: i,
+        item: { type: 'message', id: msgId, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] },
+      });
+    }
   }
 
-  // 6 – done
-  send('response.output_text.done', {
-    type: 'response.output_text.done',
-    item_id: data.output[0].id,
-    output_index: 0,
-    content_index: 0,
-    text,
-  });
-
-  // 7 – content part done
-  send('response.content_part.done', {
-    type: 'response.content_part.done',
-    item_id: data.output[0].id,
-    output_index: 0,
-    content_index: 0,
-    part: { type: 'output_text', text },
-  });
-
-  // 8 – output item done
-  send('response.output_item.done', {
-    type: 'response.output_item.done',
-    output_index: 0,
-    item: { type: 'message', id: data.output[0].id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] },
-  });
-
-  // 9 – completed
   send('response.completed', {
     type: 'response.completed',
-    response: {
-      id: respId, object: 'response', created_at: now, model,
-      status: 'completed', output: data.output, usage: data.usage,
-    },
+    response: { id: respId, object: 'response', created_at: now, model, status: 'completed', output: data.output, usage: data.usage },
   });
 
   res.end();
