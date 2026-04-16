@@ -106,11 +106,17 @@ ok "Resolved ports → n8n:${N8N_PORT}  copilot-api:${COPILOT_API_PORT}  shim:${
 # ── generate secrets if not set ───────────────────────────────────────────────
 header "Secrets"
 
-# Read from config.env values (already sourced above)
+# Priority order for encryption key:
+#  1. Explicitly set in config.env
+#  2. Already in .env from a previous setup run
+#  3. Auto-detected from a running n8n-app container
+#  4. Auto-detected from the n8n_data volume (n8n not running)
+#  5. Generate a fresh random key (fresh install only)
+
 CFG_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY:-}"
 CFG_JWT_SECRET="${JWT_SECRET:-}"
 
-# If .env already exists with a key, preserve it (prevents data loss on re-runs)
+# Check existing .env
 if [[ -f "$ENV_FILE" ]]; then
   EXISTING_KEY="$(grep '^N8N_ENCRYPTION_KEY=' "$ENV_FILE" | cut -d= -f2-)"
   EXISTING_JWT="$(grep '^JWT_SECRET=' "$ENV_FILE" | cut -d= -f2-)"
@@ -118,11 +124,40 @@ if [[ -f "$ENV_FILE" ]]; then
   [[ -z "$CFG_JWT_SECRET" && -n "$EXISTING_JWT" ]] && CFG_JWT_SECRET="$EXISTING_JWT"
 fi
 
+# Auto-detect from running n8n container
+if [[ -z "$CFG_ENCRYPTION_KEY" ]]; then
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'n8n-app\|n8n_app'; then
+    CONTAINER_NAME=$(docker ps --format '{{.Names}}' | grep -E 'n8n-app|n8n_app' | head -1)
+    DETECTED="$(docker exec "$CONTAINER_NAME" cat /home/node/.n8n/config 2>/dev/null \
+      | grep -o '"encryptionKey":"[^"]*"' | cut -d'"' -f4)"
+    if [[ -n "$DETECTED" ]]; then
+      CFG_ENCRYPTION_KEY="$DETECTED"
+      info "Auto-detected N8N_ENCRYPTION_KEY from running container (${CONTAINER_NAME})"
+    fi
+  fi
+fi
+
+# Auto-detect from n8n_data volume (n8n stopped but volume exists)
+if [[ -z "$CFG_ENCRYPTION_KEY" ]]; then
+  for VOL in n8n_data n8n_n8n_data; do
+    if docker volume inspect "$VOL" &>/dev/null 2>&1; then
+      DETECTED="$(docker run --rm -v "${VOL}":/n8ndata alpine \
+        sh -c 'cat /n8ndata/config 2>/dev/null' \
+        | grep -o '"encryptionKey":"[^"]*"' | cut -d'"' -f4 2>/dev/null || true)"
+      if [[ -n "$DETECTED" ]]; then
+        CFG_ENCRYPTION_KEY="$DETECTED"
+        info "Auto-detected N8N_ENCRYPTION_KEY from volume (${VOL})"
+        break
+      fi
+    fi
+  done
+fi
+
 if [[ -z "$CFG_ENCRYPTION_KEY" ]]; then
   CFG_ENCRYPTION_KEY="$(openssl rand -hex 24)"
-  info "Generated N8N_ENCRYPTION_KEY (saved to .env)"
+  info "Generated new N8N_ENCRYPTION_KEY (fresh install)"
 else
-  info "Using N8N_ENCRYPTION_KEY from config"
+  info "N8N_ENCRYPTION_KEY resolved — existing data will be preserved"
 fi
 
 if [[ -z "$CFG_JWT_SECRET" ]]; then
@@ -177,44 +212,60 @@ ok "All containers started"
 # ── wait for copilot-api ──────────────────────────────────────────────────────
 header "Waiting for copilot-api to be ready"
 
-echo -n "  Waiting"
-MAX_WAIT=120
+# copilot-api logs the device auth code immediately on first start.
+# Check for it within 30s rather than waiting 120s for /v1/models (which needs auth first).
+echo -n "  Waiting for copilot-api to start"
 ELAPSED=0
-until curl -sf "http://localhost:${COPILOT_API_PORT}/v1/models" &>/dev/null; do
-  if [[ $ELAPSED -ge $MAX_WAIT ]]; then
+COPILOT_READY=false
+while [[ $ELAPSED -lt 30 ]]; do
+  # Already authenticated from a previous run
+  if curl -sf --max-time 2 "http://localhost:${COPILOT_API_PORT}/v1/models" &>/dev/null; then
     echo ""
-    # copilot-api may need auth before /models works — check if it's at least listening
-    if curl -sf --max-time 2 "http://localhost:${COPILOT_API_PORT}/" &>/dev/null || \
-       curl -s --max-time 2 "http://localhost:${COPILOT_API_PORT}/v1/models" | grep -q "code\|error\|auth\|login" 2>/dev/null; then
-      ok "copilot-api is listening (needs GitHub auth — see below)"
-      break
+    ok "copilot-api is ready and authenticated"
+    COPILOT_READY=true
+    break
+  fi
+  # Needs auth — device code will be in logs
+  if docker logs copilot-api 2>&1 | grep -q 'login/device\|Please enter the code'; then
+    echo ""
+    AUTH_CODE=$(docker logs copilot-api 2>&1 | grep -oE '[A-Z0-9]{4}-[A-Z0-9]{4}' | tail -1)
+    if [[ -n "$AUTH_CODE" ]]; then
+      ok "copilot-api is running — GitHub authentication required"
+      echo ""
+      echo -e "  ${BOLD}${YELLOW}Your one-time GitHub auth code is: ${AUTH_CODE}${RESET}"
+    else
+      ok "copilot-api is running — GitHub authentication required"
     fi
-    warn "copilot-api did not become ready within ${MAX_WAIT}s. Checking logs..."
-    docker logs copilot-api --tail 20 2>&1 | sed 's/^/  /'
+    COPILOT_READY=true
     break
   fi
   echo -n "."
-  sleep 3
-  ELAPSED=$((ELAPSED + 3))
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
 done
-echo ""
+
+if [[ "$COPILOT_READY" != "true" ]]; then
+  echo ""
+  warn "copilot-api did not respond in time. Logs:"
+  docker logs copilot-api --tail 10 2>&1 | sed 's/^/  /'
+fi
 
 # ── GitHub device auth ────────────────────────────────────────────────────────
 header "GitHub Copilot Authentication"
 
 echo ""
-echo -e "  ${BOLD}You need to authenticate once with your GitHub account.${RESET}"
-echo ""
-echo "  1. Run this command to get your one-time auth code:"
-echo ""
-echo -e "     ${YELLOW}docker exec -it copilot-api copilot-api auth${RESET}"
-echo ""
-echo "  2. It will print a code like:  ${BOLD}XXXX-XXXX${RESET}"
-echo "     Open this URL in your browser and enter the code:"
+if [[ -n "${AUTH_CODE:-}" ]]; then
+  echo -e "  ${BOLD}Your one-time code is shown above.${RESET}"
+else
+  echo -e "  ${BOLD}Get your one-time auth code by running:${RESET}"
+  echo ""
+  echo -e "     ${YELLOW}docker exec -it copilot-api copilot-api auth${RESET}"
+  echo ""
+fi
+echo "  Open this URL in your browser and enter the code:"
 echo -e "     ${CYAN}https://github.com/login/device${RESET}"
 echo ""
-echo "  3. Approve access with your GitHub account (Copilot must be active)."
-echo ""
+echo "  Approve access with your GitHub account (Copilot subscription must be active)."
 echo "  The auth token is stored in a Docker volume and persists across restarts."
 echo ""
 read -rp "  Press Enter once you have completed GitHub auth to continue..."
@@ -260,7 +311,8 @@ echo "  ────────────────────────
 echo "  1. Open n8n → Settings → Credentials → New"
 echo "  2. Search for: OpenAI"
 echo "  3. Set:"
-echo -e "       Base URL:  ${YELLOW}http://copilot-shim:${COPILOT_SHIM_PORT}/v1${RESET}"
+echo -e "       Base URL:  ${YELLOW}http://copilot-shim:4142/v1${RESET}"
+echo -e "       (copilot-shim is the Docker container name — always port 4142 internally)"
 echo -e "       API Key:   ${YELLOW}dummy${RESET}"
 echo "  4. Save and use this credential in any AI Agent node or Personal Agents chat."
 echo ""
