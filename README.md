@@ -72,7 +72,7 @@ bash setup.sh
 | `WEBHOOK_URL` | `http://localhost:5678/webhook` | Base URL for n8n webhooks |
 | `N8N_ENCRYPTION_KEY` | *(auto-generated)* | Leave blank — setup.sh generates a secure value |
 | `JWT_SECRET` | *(auto-generated)* | Leave blank — setup.sh generates a secure value |
-| `ADMIN_PASSWORD` | `Change@Me123` | n8n admin password — change this |
+| `ADMIN_PASSWORD` | *(optional)* | Optional: set only for fresh installs to auto-create an admin (requires `N8N_DEFAULT_USER_EMAIL`). Leave blank for existing instances — `setup.sh` will not auto-create admins by default. |
 
 > **Port conflicts:** If any port is already in use on your server, setup.sh will automatically increment until it finds a free one and tell you which ports were assigned.
 

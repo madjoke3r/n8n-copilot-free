@@ -45,7 +45,7 @@ services:
       WEBHOOK_TUNNEL_URL: ${WEBHOOK_URL:-http://localhost:5678/webhook}
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_USER_MANAGEMENT_JWT_SECRET: ${JWT_SECRET}
-      N8N_DEFAULT_USER_PASSWORD: ${ADMIN_PASSWORD:-Change@Me123}
+      # N8N_DEFAULT_USER_PASSWORD omitted by default to avoid auto-creating admin users
       N8N_LOG_LEVEL: info
       N8N_LOG_OUTPUT: console
       N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}

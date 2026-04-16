@@ -65,7 +65,7 @@ while IFS= read -r _line || [[ -n "$_line" ]]; do
 done < "$CONFIG_FILE"
 unset _line _key _val
 
-N8N_PORT="${N8N_PORT:-5678}"
+COPILOT_API_PORT="${COPILOT_API_PORT:-4141}"
 COPILOT_API_PORT="${COPILOT_API_PORT:-4141}"
 COPILOT_SHIM_PORT="${COPILOT_SHIM_PORT:-4142}"
 COPILOT_API_VERSION="${COPILOT_API_VERSION:-0.7.0}"
@@ -76,7 +76,7 @@ N8N_HOST="${N8N_HOST:-localhost}"
 N8N_PROTOCOL="${N8N_PROTOCOL:-http}"
 N8N_EDITOR_BASE_URL="${N8N_EDITOR_BASE_URL:-http://localhost:${N8N_PORT}}"
 WEBHOOK_URL="${WEBHOOK_URL:-http://localhost:${N8N_PORT}/webhook}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-Change@Me123}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 N8N_SSL_CERT="${N8N_SSL_CERT:-}"
 N8N_SSL_KEY="${N8N_SSL_KEY:-}"
 N8N_SECURE_COOKIE="${N8N_SECURE_COOKIE:-false}"
@@ -207,7 +207,8 @@ N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
 WEBHOOK_URL=${WEBHOOK_URL}
 N8N_ENCRYPTION_KEY=${CFG_ENCRYPTION_KEY}
 JWT_SECRET=${CFG_JWT_SECRET}
-ADMIN_PASSWORD=${ADMIN_PASSWORD}
+# ADMIN_PASSWORD intentionally omitted by default to avoid auto-creating admin users on existing instances.
+# To auto-create an admin on a fresh install provide `ADMIN_PASSWORD` (and `N8N_DEFAULT_USER_EMAIL`) in `config.env`.
 N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
 EOF
 
