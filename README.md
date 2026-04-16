@@ -45,6 +45,7 @@ bash setup.sh
 ```
 
 `setup.sh` will:
+
 1. Check Docker is installed
 2. Read `config.env` for your desired ports
 3. Check each port — if already in use, automatically pick the next available one
@@ -111,6 +112,7 @@ Available models include `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, and
 n8n binds to `127.0.0.1:${N8N_PORT}` only. To expose it on a domain, put nginx or Caddy in front:
 
 **Nginx snippet:**
+
 ```nginx
 server {
     listen 443 ssl;

@@ -15,7 +15,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -U ${DB_USER:-n8n}"]
+      test: [ CMD-SHELL, "pg_isready -U ${DB_USER:-n8n}" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -48,13 +48,13 @@ services:
       N8N_DEFAULT_USER_PASSWORD: ${ADMIN_PASSWORD:-Change@Me123}
       N8N_LOG_LEVEL: info
       N8N_LOG_OUTPUT: console
-      N8N_SECURE_COOKIE: "false"
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
     volumes:
       - n8n_data:/home/node/.n8n
     ports:
       - "127.0.0.1:${N8N_PORT:-5678}:5678"
     healthcheck:
-      test: [CMD, wget, --quiet, --tries=1, --spider, "http://localhost:5678/healthz"]
+      test: [ CMD, wget, --quiet, --tries=1, --spider, "http://localhost:5678/healthz" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -100,6 +100,7 @@ volumes:
   postgres_data:
   n8n_data:
   copilot_data:
+
 
 networks:
   n8n-net:

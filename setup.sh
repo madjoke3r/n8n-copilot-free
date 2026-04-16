@@ -106,22 +106,30 @@ ok "Resolved ports → n8n:${N8N_PORT}  copilot-api:${COPILOT_API_PORT}  shim:${
 # ── generate secrets if not set ───────────────────────────────────────────────
 header "Secrets"
 
-# Read from config.env values
+# Read from config.env values (already sourced above)
 CFG_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY:-}"
 CFG_JWT_SECRET="${JWT_SECRET:-}"
+
+# If .env already exists with a key, preserve it (prevents data loss on re-runs)
+if [[ -f "$ENV_FILE" ]]; then
+  EXISTING_KEY="$(grep '^N8N_ENCRYPTION_KEY=' "$ENV_FILE" | cut -d= -f2-)"
+  EXISTING_JWT="$(grep '^JWT_SECRET=' "$ENV_FILE" | cut -d= -f2-)"
+  [[ -z "$CFG_ENCRYPTION_KEY" && -n "$EXISTING_KEY" ]] && CFG_ENCRYPTION_KEY="$EXISTING_KEY"
+  [[ -z "$CFG_JWT_SECRET" && -n "$EXISTING_JWT" ]] && CFG_JWT_SECRET="$EXISTING_JWT"
+fi
 
 if [[ -z "$CFG_ENCRYPTION_KEY" ]]; then
   CFG_ENCRYPTION_KEY="$(openssl rand -hex 24)"
   info "Generated N8N_ENCRYPTION_KEY (saved to .env)"
 else
-  info "Using N8N_ENCRYPTION_KEY from config.env"
+  info "Using N8N_ENCRYPTION_KEY from config"
 fi
 
 if [[ -z "$CFG_JWT_SECRET" ]]; then
   CFG_JWT_SECRET="$(openssl rand -hex 24)"
   info "Generated JWT_SECRET (saved to .env)"
 else
-  info "Using JWT_SECRET from config.env"
+  info "Using JWT_SECRET from config"
 fi
 
 # ── write .env ─────────────────────────────────────────────────────────────────
