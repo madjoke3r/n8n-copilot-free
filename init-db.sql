@@ -1,0 +1,3 @@
+-- n8n PostgreSQL initialization
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
