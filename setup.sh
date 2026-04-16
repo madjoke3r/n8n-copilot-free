@@ -248,6 +248,23 @@ PYEOF
   ok "docker-compose.yml patched for SSL"
 fi
 
+# ── backup existing data before restart ──────────────────────────────────────
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^n8n-postgres$'; then
+  BACKUP_DIR="${SCRIPT_DIR}/backups"
+  mkdir -p "$BACKUP_DIR"
+  BACKUP_FILE="${BACKUP_DIR}/n8n-postgres-$(date +%Y%m%d-%H%M%S).sql.gz"
+  echo -n "  Backing up postgres → $(basename "$BACKUP_FILE") ... "
+  if docker exec n8n-postgres pg_dump -U n8n n8n 2>/dev/null | gzip > "$BACKUP_FILE"; then
+    echo "done"
+    info "Backup saved: ${BACKUP_FILE}"
+    # Keep only the 10 most recent backups
+    ls -t "${BACKUP_DIR}"/n8n-postgres-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm --
+  else
+    echo "skipped (empty or failed)"
+    rm -f "$BACKUP_FILE"
+  fi
+fi
+
 # ── pull images ───────────────────────────────────────────────────────────────
 header "Pulling Docker images"
 $COMPOSE --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull --quiet

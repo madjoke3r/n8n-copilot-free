@@ -11,6 +11,9 @@ certs/
 # Local data directories if you ever switch to bind mounts
 data/
 
+# Backups created by setup.sh
+backups/
+
 # Editor noise
 .DS_Store
 Thumbs.db
