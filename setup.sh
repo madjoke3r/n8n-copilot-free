@@ -51,9 +51,19 @@ fi
 # ── load config ───────────────────────────────────────────────────────────────
 header "Loading configuration"
 
-# Source safely — only grab known variables
-# shellcheck source=config.env
-source <(grep -E '^[A-Z_]+=.*' "$CONFIG_FILE" | grep -v '^#')
+# Source safely — CRLF-aware, handles inline comments and Windows line endings
+while IFS= read -r _line || [[ -n "$_line" ]]; do
+  _line="${_line%$'\r'}"                          # strip trailing CR (CRLF files)
+  [[ "$_line" =~ ^[[:space:]]*# ]] && continue   # skip comment lines
+  [[ -z "${_line//[[:space:]]/}" ]] && continue  # skip blank lines
+  _key="${_line%%=*}"
+  [[ "$_key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue  # only valid var names
+  _val="${_line#*=}"
+  _val="${_val%%#*}"                              # strip inline comment
+  _val="${_val%"${_val##*[! $'\t']}"}"            # rtrim whitespace
+  printf -v "$_key" '%s' "$_val" 2>/dev/null || true
+done < "$CONFIG_FILE"
+unset _line _key _val
 
 N8N_PORT="${N8N_PORT:-5678}"
 COPILOT_API_PORT="${COPILOT_API_PORT:-4141}"
@@ -341,7 +351,7 @@ header "Setup complete"
 echo ""
 echo -e "  ${GREEN}${BOLD}Everything is running!${RESET}"
 echo ""
-echo -e "  ${BOLD}n8n URL:${RESET}           ${N8N_PROTOCOL:-http}://localhost:${N8N_PORT}"
+echo -e "  ${BOLD}n8n URL:${RESET}           ${N8N_EDITOR_BASE_URL:-${N8N_PROTOCOL:-http}://localhost:${N8N_PORT}}"
 echo -e "  ${BOLD}Admin password:${RESET}    ${ADMIN_PASSWORD}"
 echo ""
 echo -e "  ${YELLOW}If you access n8n via a reverse proxy or different URL, use that instead.${RESET}"
