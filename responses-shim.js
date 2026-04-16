@@ -10,6 +10,7 @@
 'use strict';
 
 const http = require('http');
+const zlib = require('zlib');
 
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST || 'copilot-api';
 const UPSTREAM_PORT = parseInt(process.env.UPSTREAM_PORT || '4141', 10);
@@ -129,7 +130,7 @@ function buildMessages(parsed) {
       if (Array.isArray(item.content)) {
         // Some n8n versions embed tool_result blocks inside a user message content array
         const toolResults = item.content.filter(c => c.type === 'tool_result');
-        const textParts  = item.content.filter(c => c.type !== 'tool_result');
+        const textParts = item.content.filter(c => c.type !== 'tool_result');
         for (const tr of toolResults) {
           messages.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: flattenContent(tr.content) });
         }
@@ -185,14 +186,16 @@ function handleResponsesRequest(reqBody, authHeader, callback) {
   let parsed;
   try { parsed = JSON.parse(reqBody); }
   catch (e) {
+    const isBinary = reqBody.length > 0 && reqBody.charCodeAt(0) < 32;
+    const preview = isBinary
+      ? Buffer.from(reqBody, 'binary').slice(0, 80).toString('hex')
+      : reqBody.slice(0, 300);
+    console.error(`[shim] JSON parse fail: body-len=${reqBody.length} binary=${isBinary} preview=${preview}`);
     return callback({ status: 400, message: 'Invalid JSON in request body' });
   }
 
   const hasTools = parsed.tools && parsed.tools.length > 0;
-  console.log('[shim] Request model:', parsed.model,
-    '| stream:', parsed.stream,
-    '| tools:', hasTools ? parsed.tools.length : 0,
-    '| input preview:', JSON.stringify(parsed.input).slice(0, 120));
+  console.log(`[shim] Request model: ${parsed.model} | stream: ${parsed.stream} | tools: ${(parsed.tools || []).length} | input preview: ${JSON.stringify((parsed.input || [])[0]).slice(0, 120)}`);
 
   const wantsStream = !!parsed.stream;
   const messages = buildMessages(parsed);
@@ -283,7 +286,7 @@ function sendStreamingResponse(res, data) {
 
     } else if (item.type === 'message') {
       // ── text message streaming ──
-      const text  = ((item.content || [{}])[0] || {}).text || '';
+      const text = ((item.content || [{}])[0] || {}).text || '';
       const msgId = item.id;
 
       send('response.output_item.added', {
@@ -332,46 +335,74 @@ const server = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', c => chunks.push(c));
   req.on('end', () => {
-    const body = Buffer.concat(chunks);
+    const rawBody = Buffer.concat(chunks);
+    const encoding = (req.headers['content-encoding'] || '').toLowerCase().trim();
 
-    if (req.method === 'POST' && req.url === '/v1/responses') {
-      handleResponsesRequest(body.toString(), req.headers['authorization'], (err, data, wantsStream) => {
-        if (err) {
-          res.writeHead(err.status || 500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: { message: err.message, type: 'shim_error' } }));
-          console.error(`[shim] /v1/responses error: ${err.message}`);
-          return;
-        }
-        if (wantsStream) {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          });
-          sendStreamingResponse(res, data);
-          console.log(`[shim] /v1/responses → /v1/chat/completions OK streaming (model: ${data.model})`);
-        } else {
-          const out = Buffer.from(JSON.stringify(data));
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': out.length });
-          res.end(out);
-          console.log(`[shim] /v1/responses → /v1/chat/completions OK (model: ${data.model})`);
-        }
+    const dispatch = (body) => {
+      if (req.method === 'POST' && req.url === '/v1/responses') {
+        handleResponsesRequest(body.toString('utf8'), req.headers['authorization'], (err, data, wantsStream) => {
+          if (err) {
+            res.writeHead(err.status || 500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: err.message, type: 'shim_error' } }));
+            console.error(`[shim] /v1/responses error: ${err.message}`);
+            return;
+          }
+          if (wantsStream) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            });
+            try {
+              sendStreamingResponse(res, data);
+            } catch (streamErr) {
+              console.error('[shim] sendStreamingResponse threw:', streamErr.message, streamErr.stack);
+              // Connection may already be partially written; try to close cleanly
+              try { res.end(); } catch (_) { }
+            }
+            console.log(`[shim] /v1/responses → /v1/chat/completions OK streaming (model: ${data.model})`);
+          } else {
+            const out = Buffer.from(JSON.stringify(data));
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': out.length });
+            res.end(out);
+            console.log(`[shim] /v1/responses → /v1/chat/completions OK (model: ${data.model})`);
+          }
+        });
+      } else {
+        // Pass-through for /v1/models, /v1/chat/completions, /v1/embeddings, etc.
+        const fwdHeaders = Object.assign({}, req.headers, {
+          host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
+          'content-length': body.length,
+        });
+        forwardRaw(req.method, req.url, fwdHeaders, body, (err, status, respHeaders, respBuf) => {
+          if (err) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+          }
+          res.writeHead(status, respHeaders);
+          res.end(respBuf);
+        });
+      }
+    }; // end dispatch
+
+    if (encoding === 'gzip') {
+      zlib.gunzip(rawBody, (err, buf) => {
+        if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'gzip decompress failed' })); return; }
+        dispatch(buf);
+      });
+    } else if (encoding === 'deflate') {
+      zlib.inflate(rawBody, (err, buf) => {
+        if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'deflate decompress failed' })); return; }
+        dispatch(buf);
+      });
+    } else if (encoding === 'br') {
+      zlib.brotliDecompress(rawBody, (err, buf) => {
+        if (err) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'brotli decompress failed' })); return; }
+        dispatch(buf);
       });
     } else {
-      // Pass-through for /v1/models, /v1/chat/completions, /v1/embeddings, etc.
-      const fwdHeaders = Object.assign({}, req.headers, {
-        host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
-        'content-length': body.length,
-      });
-      forwardRaw(req.method, req.url, fwdHeaders, body, (err, status, respHeaders, respBuf) => {
-        if (err) {
-          res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-          return;
-        }
-        res.writeHead(status, respHeaders);
-        res.end(respBuf);
-      });
+      dispatch(rawBody);
     }
   });
 });

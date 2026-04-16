@@ -284,7 +284,8 @@ header "Waiting for n8n"
 
 echo -n "  Waiting"
 ELAPSED=0
-until curl -sf "http://localhost:${N8N_PORT}/healthz" &>/dev/null; do
+N8N_HEALTH_PROTO="${N8N_PROTOCOL:-http}"
+until curl -sfk "${N8N_HEALTH_PROTO}://localhost:${N8N_PORT}/healthz" &>/dev/null; do
   if [[ $ELAPSED -ge 90 ]]; then
     echo ""
     warn "n8n did not respond within 90s. Check: docker logs n8n-app"
@@ -303,8 +304,11 @@ header "Setup complete"
 echo ""
 echo -e "  ${GREEN}${BOLD}Everything is running!${RESET}"
 echo ""
-echo -e "  ${BOLD}n8n URL:${RESET}           http://localhost:${N8N_PORT}"
+echo -e "  ${BOLD}n8n URL:${RESET}           ${N8N_PROTOCOL:-http}://localhost:${N8N_PORT}"
 echo -e "  ${BOLD}Admin password:${RESET}    ${ADMIN_PASSWORD}"
+echo ""
+echo -e "  ${YELLOW}If you access n8n via a reverse proxy or different URL, use that instead.${RESET}"
+echo -e "  ${YELLOW}To uninstall cleanly, run:  bash uninstall.sh${RESET}"
 echo ""
 echo -e "  ${BOLD}${CYAN}Configure n8n to use GitHub Copilot as AI:${RESET}"
 echo "  ─────────────────────────────────────────"

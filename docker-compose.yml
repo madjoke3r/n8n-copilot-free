@@ -49,10 +49,11 @@ services:
       N8N_LOG_LEVEL: info
       N8N_LOG_OUTPUT: console
       N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
+      N8N_PUSH_BACKEND: websocket
     volumes:
       - n8n_data:/home/node/.n8n
     ports:
-      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+      - "${N8N_PORT:-5678}:5678"
     healthcheck:
       test: [ CMD, wget, --quiet, --tries=1, --spider, "http://localhost:5678/healthz" ]
       interval: 30s
