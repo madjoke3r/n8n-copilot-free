@@ -35,7 +35,7 @@ n8n  ──►  copilot-shim (port 4142)  ──►  copilot-api (port 4141)  �
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/n8n-copilot-free.git
+git clone https://github.com/madjoke3r/n8n-copilot-free.git
 cd n8n-copilot-free
 
 # Optional: edit config.env first (ports, domain, passwords)
