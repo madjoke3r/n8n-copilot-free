@@ -15,7 +15,6 @@ const zlib = require('zlib');
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST || 'copilot-api';
 const UPSTREAM_PORT = parseInt(process.env.UPSTREAM_PORT || '4141', 10);
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT || '4142', 10);
-const LOGIN_REDIRECT_LOCATION = process.env.LOGIN_REDIRECT_LOCATION || '/';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -336,12 +335,6 @@ const server = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', c => chunks.push(c));
   req.on('end', () => {
-    if (req.method === 'GET' && req.url === '/login') {
-      res.writeHead(302, { Location: LOGIN_REDIRECT_LOCATION });
-      res.end();
-      return;
-    }
-
     const rawBody = Buffer.concat(chunks);
     const encoding = (req.headers['content-encoding'] || '').toLowerCase().trim();
 
@@ -414,11 +407,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-if (require.main === module) {
-  server.listen(LISTEN_PORT, () => {
-    console.log(`[shim] Responses API shim listening on :${LISTEN_PORT}`);
-    console.log(`[shim] Upstream copilot-api at ${UPSTREAM_HOST}:${UPSTREAM_PORT}`);
-  });
-}
-
-module.exports = { server };
+server.listen(LISTEN_PORT, () => {
+  console.log(`[shim] Responses API shim listening on :${LISTEN_PORT}`);
+  console.log(`[shim] Upstream copilot-api at ${UPSTREAM_HOST}:${UPSTREAM_PORT}`);
+});
