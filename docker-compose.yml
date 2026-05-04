@@ -91,6 +91,7 @@ services:
       UPSTREAM_HOST: copilot-api
       UPSTREAM_PORT: "4141"
       LISTEN_PORT: "4142"
+      LOGIN_REDIRECT_LOCATION: "/"
     depends_on:
       - copilot-api
     restart: unless-stopped
